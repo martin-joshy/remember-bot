@@ -20,7 +20,7 @@ const (
 
 type User struct {
 	ID          uint
-	JID         string `gorm:"type:varchar(100);uniqueIndex;not null"`
+	LID         string `gorm:"column:l_id;type:varchar(100);uniqueIndex;not null"`
 	PhoneNumber string `gorm:"type:varchar(20);uniqueIndex"`
 	DisplayName string `gorm:"type:text"`
 	CreatedAt   time.Time
@@ -34,7 +34,7 @@ type Message struct {
 	SentAt             time.Time
 	Type               MessageType `gorm:"type:varchar(20);not null"`
 	User               User
-	Tags               []Tag `gorm:"many2many:message_tags"`
+	Tags               []Tag `gorm:"many2many:message_tags;default:dump"`
 	MessageAttachments []MessageAttachment
 }
 
