@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"time"
 
 	"gorm.io/driver/sqlite"
@@ -60,7 +59,6 @@ type Tag struct {
 var DB *gorm.DB
 
 func init() {
-	fmt.Println("I am inside DBBB")
 	var err error
 	DB, err = gorm.Open(sqlite.Open("bot.db"), &gorm.Config{})
 	if err != nil {
