@@ -31,12 +31,7 @@ func main() {
 func eventHandler(evt any) {
 	switch v := evt.(type) {
 	case *events.Message:
-
-		contextInfo := v.Message.GetExtendedTextMessage().GetContextInfo()
-		msgUserInfo := v.Info
 		LID, phoneNumber := getLIDAndNumberFromEvent(v)
-		message := contextInfo.GetQuotedMessage().String()
-		// TODO: listen to only the whitelisted jid as we dont want public access
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -44,53 +39,69 @@ func eventHandler(evt any) {
 		user, err := gorm.G[User](DB).Where("l_id = ?", LID).First(ctx)
 
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			userCreationErr := gorm.G[User](DB).Create(ctx,
-				&User{
-					LID: LID, DisplayName: msgUserInfo.PushName, PhoneNumber: phoneNumber,
-					Messages: []Message{{
-						StanzaID: contextInfo.GetStanzaID(), SentAt: msgUserInfo.Timestamp, Type: MessageTypeText,
-						MessageAttachments: []MessageAttachment{{Body: &message}},
-					}},
-				})
+			handleNewUser(ctx, v, LID, phoneNumber)
+			return
+		}
 
-			if userCreationErr != nil {
-				_, sendErr := client.SendMessage(
-					context.Background(), msgUserInfo.Sender, &waE2E.Message{
-						Conversation: proto.String(
-							ServerUnknownErrMsg),
-					})
-				slog.Error("User was not created and an Error message send to user")
-				if sendErr != nil {
-					slog.Error(ErrMsgNotSend)
-				}
-			} else {
-				_, sendErr := client.SendMessage(
-					context.Background(), msgUserInfo.Sender, &waE2E.Message{
-						Conversation: proto.String(
-							WelcomeMsg),
-					})
-				if sendErr != nil {
-					slog.Error(ErrMsgNotSend)
-				}
-			}
+		handleExistingUser(ctx, v, user)
+	}
+}
 
-		} else {
-			msgCreationErr := gorm.G[Message](DB).Create(ctx,
-				&Message{
-					UserID: user.ID, StanzaID: contextInfo.GetStanzaID(), SentAt: msgUserInfo.Timestamp, Type: MessageTypeText,
-					MessageAttachments: []MessageAttachment{{Body: &message}},
-				})
-			if msgCreationErr != nil {
-				_, sendErr := client.SendMessage(
-					context.Background(), msgUserInfo.Sender, &waE2E.Message{
-						Conversation: proto.String(
-							ServerUnknownErrMsg),
-					})
-				slog.Error("Messsage was not created and an Error message send to user")
-				if sendErr != nil {
-					slog.Error(ErrMsgNotSend)
-				}
-			}
+func handleNewUser(ctx context.Context, evt *events.Message, LID, phoneNumber string) {
+	contextInfo := evt.Message.GetExtendedTextMessage().GetContextInfo()
+	message := contextInfo.GetQuotedMessage().String()
+
+	userCreationErr := gorm.G[User](DB).Create(ctx,
+		&User{
+			LID: LID, DisplayName: evt.Info.PushName, PhoneNumber: phoneNumber,
+			Messages: []Message{{
+				StanzaID: contextInfo.GetStanzaID(), SentAt: evt.Info.Timestamp, Type: MessageTypeText,
+				MessageAttachments: []MessageAttachment{{Body: &message}},
+			}},
+		})
+
+	if userCreationErr != nil {
+		_, sendErr := client.SendMessage(
+			context.Background(), evt.Info.Sender, &waE2E.Message{
+				Conversation: proto.String(
+					ServerUnknownErrMsg),
+			})
+		slog.Error("User was not created and an Error message send to user")
+		if sendErr != nil {
+			slog.Error(ErrMsgNotSend)
+		}
+		return
+	}
+
+	_, sendErr := client.SendMessage(
+		context.Background(), evt.Info.Sender, &waE2E.Message{
+			Conversation: proto.String(
+				WelcomeMsg),
+		})
+	if sendErr != nil {
+		slog.Error(ErrMsgNotSend)
+	}
+}
+
+func handleExistingUser(ctx context.Context, evt *events.Message, user User) {
+	contextInfo := evt.Message.GetExtendedTextMessage().GetContextInfo()
+	message := contextInfo.GetQuotedMessage().String()
+
+	msgCreationErr := gorm.G[Message](DB).Create(ctx,
+		&Message{
+			UserID: user.ID, StanzaID: contextInfo.GetStanzaID(), SentAt: evt.Info.Timestamp, Type: MessageTypeText,
+			MessageAttachments: []MessageAttachment{{Body: &message}},
+		})
+
+	if msgCreationErr != nil {
+		_, sendErr := client.SendMessage(
+			context.Background(), evt.Info.Sender, &waE2E.Message{
+				Conversation: proto.String(
+					ServerUnknownErrMsg),
+			})
+		slog.Error("Messsage was not created and an Error message send to user")
+		if sendErr != nil {
+			slog.Error(ErrMsgNotSend)
 		}
 	}
 }
@@ -101,10 +112,9 @@ func eventHandler(evt any) {
 func getLIDAndNumberFromEvent(evt *events.Message) (string, string) {
 	if strings.Contains(evt.Info.Sender.String(), "@lid") {
 		return evt.Info.Sender.User, evt.Info.SenderAlt.User
-	} else {
-		// TODO: This block is to be testd as I don't have number that send JID
-		return evt.Info.SenderAlt.String(), evt.Info.Sender.User
 	}
+	// TODO: This block is to be testd as I don't have number that send JID
+	return evt.Info.SenderAlt.String(), evt.Info.Sender.User
 }
 
 var client *whatsmeow.Client
