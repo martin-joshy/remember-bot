@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -21,71 +22,76 @@ import (
 	"gorm.io/gorm"
 )
 
-func eventHandler(evt interface{}) {
+func main() {
+	configureSlog()
+	setupDB()
+	startWaServerAndListenEvt()
+}
+
+func eventHandler(evt any) {
 	switch v := evt.(type) {
 	case *events.Message:
-		fmt.Println("Received a message!", v.Message.GetConversation())
 
 		contextInfo := v.Message.GetExtendedTextMessage().GetContextInfo()
-
-		if contextInfo != nil {
-			quotedID := contextInfo.GetStanzaID()
-			quotedMessage := contextInfo.GetQuotedMessage()
-
-			fmt.Println("Id : ", quotedID, ", Message : ", quotedMessage)
-
-		}
-
 		msgUserInfo := v.Info
-		fmt.Println("PhoneNumber :", msgUserInfo.SenderAlt.User, "DisplayName : ", msgUserInfo.PushName, "JID : ", msgUserInfo.Sender.User)
 		LID, phoneNumber := getLIDAndNumberFromEvent(v)
 		message := contextInfo.GetQuotedMessage().String()
-		// listen to only the whitelisted jid as we dont want
-		// no else to use
+		// TODO: listen to only the whitelisted jid as we dont want public access
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		// check if the jid exist in the db
+
 		user, err := gorm.G[User](DB).Where("l_id = ?", LID).First(ctx)
+
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			err := gorm.G[User](DB).Create(ctx, &User{
-				LID: LID, DisplayName: msgUserInfo.PushName, PhoneNumber: phoneNumber,
-				Messages: []Message{{
-					StanzaID: contextInfo.GetStanzaID(), SentAt: msgUserInfo.Timestamp, Type: MessageTypeText,
-					MessageAttachments: []MessageAttachment{{Body: &message}},
-				}},
-			})
-			serverUnknownErrMsg := "An unknown Error occured, please try after sometime"
-			if err != nil {
-				_, sendErr := client.SendMessage(context.Background(), msgUserInfo.Sender, &waE2E.Message{
-					Conversation: proto.String(serverUnknownErrMsg),
+			userCreationErr := gorm.G[User](DB).Create(ctx,
+				&User{
+					LID: LID, DisplayName: msgUserInfo.PushName, PhoneNumber: phoneNumber,
+					Messages: []Message{{
+						StanzaID: contextInfo.GetStanzaID(), SentAt: msgUserInfo.Timestamp, Type: MessageTypeText,
+						MessageAttachments: []MessageAttachment{{Body: &message}},
+					}},
 				})
-			}
-			// sendWelcomeText()
-			_, sendErr := client.SendMessage(context.Background(), msgUserInfo.Sender, &waE2E.Message{
-				Conversation: proto.String("Hello, World!"),
-			})
 
-			if sendErr != nil {
-				fmt.Println(sendErr)
+			if userCreationErr != nil {
+				_, sendErr := client.SendMessage(
+					context.Background(), msgUserInfo.Sender, &waE2E.Message{
+						Conversation: proto.String(
+							ServerUnknownErrMsg),
+					})
+				slog.Error("User was not created and an Error message send to user")
+				if sendErr != nil {
+					slog.Error(ErrMsgNotSend)
+				}
+			} else {
+				_, sendErr := client.SendMessage(
+					context.Background(), msgUserInfo.Sender, &waE2E.Message{
+						Conversation: proto.String(
+							WelcomeMsg),
+					})
+				if sendErr != nil {
+					slog.Error(ErrMsgNotSend)
+				}
 			}
+
 		} else {
-			err := gorm.G[Message](DB).Create(ctx, &Message{
-				UserID: user.ID, StanzaID: contextInfo.GetStanzaID(), SentAt: msgUserInfo.Timestamp, Type: MessageTypeText,
-				MessageAttachments: []MessageAttachment{{Body: &message}},
-			})
-			fmt.Println(err)
+			msgCreationErr := gorm.G[Message](DB).Create(ctx,
+				&Message{
+					UserID: user.ID, StanzaID: contextInfo.GetStanzaID(), SentAt: msgUserInfo.Timestamp, Type: MessageTypeText,
+					MessageAttachments: []MessageAttachment{{Body: &message}},
+				})
+			if msgCreationErr != nil {
+				_, sendErr := client.SendMessage(
+					context.Background(), msgUserInfo.Sender, &waE2E.Message{
+						Conversation: proto.String(
+							ServerUnknownErrMsg),
+					})
+				slog.Error("Messsage was not created and an Error message send to user")
+				if sendErr != nil {
+					slog.Error(ErrMsgNotSend)
+				}
+			}
 		}
-		_, sendErr := client.SendMessage(context.Background(), msgUserInfo.Sender, &waE2E.Message{
-			Conversation: proto.String("Hello, World!"),
-		})
-
-		if sendErr != nil {
-			fmt.Println(sendErr)
-		}
-		// and send welcome
-		// then storeForwards() or else only storeForwards()
-		// send error or success for storeForwards()
 	}
 }
 
@@ -101,21 +107,15 @@ func getLIDAndNumberFromEvent(evt *events.Message) (string, string) {
 	}
 }
 
-// func sendWelcomeText() string { // welcome text for new user
-// 	panic("Not implimented")
-// }
-
-// func storeMsgForwards(any) error { // think if I should use generics
-// 	// this function should handle all the Forward type case
-// 	// string
-// 	// store the messages with type text and the attachment with body
-// 	// and with tag dump as the default tag
-// 	panic("Not implimented")
-// }
-
 var client *whatsmeow.Client
 
-func main() {
+const (
+	ServerUnknownErrMsg = "An unknown Error occured, please try after sometime"
+	ErrMsgNotSend       = "The error message was not send to the user"
+	WelcomeMsg          = "Hi Ms.Muneera, I am your welcome bot. Nice to meet you !!"
+)
+
+func startWaServerAndListenEvt() {
 	dbLog := waLog.Stdout("Database", "DEBUG", true)
 	ctx := context.Background()
 	container, err := sqlstore.New(ctx, "sqlite3", "file:bot.db?_foreign_keys=on", dbLog)
@@ -140,26 +140,27 @@ func main() {
 		}
 		for evt := range qrChan {
 			if evt.Event == "code" {
-				// Render the QR code here
 				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-				// or just manually `echo 2@... | qrencode -t ansiutf8` in a terminal
 				fmt.Println("QR code:", evt.Code)
 			} else {
 				fmt.Println("Login event:", evt.Event)
 			}
 		}
 	} else {
-		// Already logged in, just connect
 		err = client.Connect()
 		if err != nil {
 			panic(err)
 		}
 	}
 
-	// Listen to Ctrl+C (you can also do something else that prevents the program from exiting)
+	// Listen to Ctrl+C
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	<-c
 
 	client.Disconnect()
+}
+
+func configureSlog() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{AddSource: true})))
 }

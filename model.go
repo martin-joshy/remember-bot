@@ -58,7 +58,7 @@ type Tag struct {
 
 var DB *gorm.DB
 
-func init() {
+func setupDB() {
 	var err error
 	DB, err = gorm.Open(sqlite.Open("bot.db"), &gorm.Config{})
 	if err != nil {
