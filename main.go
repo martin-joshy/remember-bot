@@ -99,7 +99,7 @@ func handleExistingUser(ctx context.Context, evt *events.Message, user User) {
 				Conversation: proto.String(
 					ServerUnknownErrMsg),
 			})
-		slog.Error("Messsage was not created and an Error message send to user")
+		slog.Error("messsage was not created and an error message send to user")
 		if sendErr != nil {
 			slog.Error(ErrMsgNotSent)
 		}
