@@ -62,24 +62,24 @@ func handleNewUser(ctx context.Context, evt *events.Message, LID, phoneNumber st
 
 	if userCreationErr != nil {
 		_, sendErr := client.SendMessage(
-			context.Background(), evt.Info.Sender, &waE2E.Message{
+			ctx, evt.Info.Sender, &waE2E.Message{
 				Conversation: proto.String(
 					ServerUnknownErrMsg),
 			})
 		slog.Error("User was not created and an Error message send to user")
 		if sendErr != nil {
-			slog.Error(ErrMsgNotSend)
+			slog.Error(ErrMsgNotSent)
 		}
 		return
 	}
 
 	_, sendErr := client.SendMessage(
-		context.Background(), evt.Info.Sender, &waE2E.Message{
+		ctx, evt.Info.Sender, &waE2E.Message{
 			Conversation: proto.String(
 				WelcomeMsg),
 		})
 	if sendErr != nil {
-		slog.Error(ErrMsgNotSend)
+		slog.Error(ErrMsgNotSent)
 	}
 }
 
@@ -95,13 +95,13 @@ func handleExistingUser(ctx context.Context, evt *events.Message, user User) {
 
 	if msgCreationErr != nil {
 		_, sendErr := client.SendMessage(
-			context.Background(), evt.Info.Sender, &waE2E.Message{
+			ctx, evt.Info.Sender, &waE2E.Message{
 				Conversation: proto.String(
 					ServerUnknownErrMsg),
 			})
 		slog.Error("Messsage was not created and an Error message send to user")
 		if sendErr != nil {
-			slog.Error(ErrMsgNotSend)
+			slog.Error(ErrMsgNotSent)
 		}
 	}
 }
@@ -113,15 +113,15 @@ func getLIDAndNumberFromEvent(evt *events.Message) (string, string) {
 	if strings.Contains(evt.Info.Sender.String(), "@lid") {
 		return evt.Info.Sender.User, evt.Info.SenderAlt.User
 	}
-	// TODO: This block is to be testd as I don't have number that send JID
+	// TODO: This block is to be tested as I don't have number that send JID
 	return evt.Info.SenderAlt.String(), evt.Info.Sender.User
 }
 
 var client *whatsmeow.Client
 
 const (
-	ServerUnknownErrMsg = "An unknown Error occured, please try after sometime"
-	ErrMsgNotSend       = "The error message was not send to the user"
+	ServerUnknownErrMsg = "an unknown error occurred, please try again after some time"
+	ErrMsgNotSent       = "the error message was not send to the user"
 	WelcomeMsg          = "Hi Ms.Muneera, I am your welcome bot. Nice to meet you !!"
 )
 
@@ -143,7 +143,10 @@ func startWaServerAndListenEvt() {
 
 	if client.Store.ID == nil {
 		// No ID stored, new login
-		qrChan, _ := client.GetQRChannel(context.Background())
+		qrChan, qrErr := client.GetQRChannel(context.Background())
+		if qrErr != nil {
+			slog.Error("Qr Error: ", "error", qrErr)
+		}
 		err = client.Connect()
 		if err != nil {
 			panic(err)
@@ -162,6 +165,7 @@ func startWaServerAndListenEvt() {
 			panic(err)
 		}
 	}
+	defer client.Disconnect()
 
 	// Listen to Ctrl+C
 	c := make(chan os.Signal, 1)
