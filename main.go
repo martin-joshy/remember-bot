@@ -31,10 +31,17 @@ func main() {
 func eventHandler(evt any) {
 	switch v := evt.(type) {
 	case *events.Message:
+
 		LID, phoneNumber := getLIDAndNumberFromEvent(v)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
+
+		if strings.HasPrefix(v.Message.GetConversation(), "!") {
+			if strings.HasPrefix(v.Message.GetConversation(), "!tag") {
+				sendUserTaggedMsgs(ctx, v, LID)
+			}
+		}
 
 		user, err := gorm.G[User](DB).Where("l_id = ?", LID).First(ctx)
 
@@ -45,6 +52,32 @@ func eventHandler(evt any) {
 
 		handleExistingUser(ctx, v, user)
 	}
+}
+
+func sendUserTaggedMsgs(ctx context.Context, evt *events.Message, LID string) {
+	parts := strings.SplitN(strings.TrimSpace(evt.Message.GetConversation()), " ", 2)
+	if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
+		client.SendMessage(ctx, evt.Info.Sender, &waE2E.Message{
+			Conversation: proto.String("Usage: !tag <tag_name>"),
+		})
+		return
+	}
+	tagName := strings.TrimSpace(parts[1])
+
+	user, err := gorm.G[User](DB).Where("l_id = ?", LID).First(ctx)
+	if err != nil {
+		slog.Error("user not found", "lid", LID)
+		return
+	}
+}
+
+func ListMsgsByUserTag(ctx context.Context, userId uint, tagName string) ([]Message, error) {
+	return gorm.G[Message](DB).
+		Joins("JOIN message_tags mt ON mt.message_id = messages.id", nil).
+		Joins("JOIN tags t ON mt.tag_id = t.id", nil).
+		Where("t.name = ? AND t.user_id = ?", tagName, userId).
+		Preload("Tags", nil).
+		Find(ctx)
 }
 
 func handleNewUser(ctx context.Context, evt *events.Message, LID, phoneNumber string) {
