@@ -1,11 +1,16 @@
 package main
 
 import (
-	"time"
+	"context"
+	"database/sql"
+	_ "embed"
 
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
+	_ "github.com/mattn/go-sqlite3"
+	"remember-bot/db"
 )
+
+//go:embed sql/schema.sql
+var ddl string
 
 type MessageType string
 
@@ -17,56 +22,17 @@ const (
 	MessageTypeAudio    MessageType = "audio"
 )
 
-type User struct {
-	ID          uint
-	LID         string `gorm:"column:l_id;type:varchar(100);uniqueIndex;not null"`
-	PhoneNumber string `gorm:"type:varchar(20);uniqueIndex"`
-	DisplayName string `gorm:"type:text"`
-	CreatedAt   time.Time
-	Messages    []Message
-}
-
-type Message struct {
-	ID                 uint
-	UserID             uint   `gorm:"index;not null"`
-	StanzaID           string `gorm:"type:varchar(100);index"`
-	SentAt             time.Time
-	Type               MessageType `gorm:"type:varchar(20);not null"`
-	User               User
-	Tags               []Tag `gorm:"many2many:message_tags;default:dump"`
-	MessageAttachments []MessageAttachment
-}
-
-type MessageAttachment struct {
-	ID        uint
-	MessageID uint    `gorm:"index;not null"`
-	Body      *string `gorm:"type:text"`
-	FileName  string  `gorm:"type:varchar(255)"`
-	FilePath  string  `gorm:"type:varchar(512)"`
-	MimeType  string  `gorm:"type:varchar(255)"`
-	FileSize  uint
-	Message   Message
-}
-
-type Tag struct {
-	ID       uint
-	UserID   uint   `gorm:"not null;uniqueIndex:tag_user_name"`
-	Name     string `gorm:"type:varchar(100);uniqueIndex:tag_user_name"`
-	User     User
-	Messages []Message `gorm:"many2many:message_tags"`
-}
-
-var DB *gorm.DB
+var queries *db.Queries
 
 func setupDB() {
-	var err error
-	DB, err = gorm.Open(sqlite.Open("bot.db"), &gorm.Config{})
+	database, err := sql.Open("sqlite3", "bot.db?_foreign_keys=on")
 	if err != nil {
 		panic("failed to connect database")
 	}
 
-	err = DB.AutoMigrate(&User{}, &Message{}, &MessageAttachment{}, &Tag{})
-	if err != nil {
-		panic("failed to migrate")
+	if _, err := database.ExecContext(context.Background(), ddl); err != nil {
+		panic("failed to migrate: " + err.Error())
 	}
+
+	queries = db.New(database)
 }

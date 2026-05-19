@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -19,7 +20,8 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
-	"gorm.io/gorm"
+
+	"remember-bot/db"
 )
 
 func main() {
@@ -43,9 +45,9 @@ func eventHandler(evt any) {
 			}
 		}
 
-		user, err := gorm.G[User](DB).Where("l_id = ?", LID).First(ctx)
+		user, err := queries.GetUserByLID(ctx, LID)
 
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		if errors.Is(err, sql.ErrNoRows) {
 			handleNewUser(ctx, v, LID, phoneNumber)
 			return
 		}
@@ -57,43 +59,42 @@ func eventHandler(evt any) {
 func sendUserTaggedMsgs(ctx context.Context, evt *events.Message, LID string) {
 	parts := strings.SplitN(strings.TrimSpace(evt.Message.GetConversation()), " ", 2)
 	if len(parts) < 2 || strings.TrimSpace(parts[1]) == "" {
-		client.SendMessage(ctx, evt.Info.Sender, &waE2E.Message{
+		_, sendErr := client.SendMessage(ctx, evt.Info.Sender, &waE2E.Message{
 			Conversation: proto.String("Usage: !tag <tag_name>"),
 		})
+		if sendErr != nil {
+			slog.Error(ErrMsgNotSent)
+		}
 		return
 	}
 	tagName := strings.TrimSpace(parts[1])
 
-	user, err := gorm.G[User](DB).Where("l_id = ?", LID).First(ctx)
+	user, err := queries.GetUserByLID(ctx, LID)
 	if err != nil {
 		slog.Error("user not found", "lid", LID)
 		return
 	}
+	_ = user
+	_ = tagName
 }
 
-func ListMsgsByUserTag(ctx context.Context, userId uint, tagName string) ([]Message, error) {
-	return gorm.G[Message](DB).
-		Joins("JOIN message_tags mt ON mt.message_id = messages.id", nil).
-		Joins("JOIN tags t ON mt.tag_id = t.id", nil).
-		Where("t.name = ? AND t.user_id = ?", tagName, userId).
-		Preload("Tags", nil).
-		Find(ctx)
+func ListMsgsByUserTag(ctx context.Context, userID int64, tagName string) ([]db.Message, error) {
+	return queries.ListMessagesByUserTag(ctx, db.ListMessagesByUserTagParams{
+		Name:   tagName,
+		UserID: userID,
+	})
 }
 
 func handleNewUser(ctx context.Context, evt *events.Message, LID, phoneNumber string) {
 	contextInfo := evt.Message.GetExtendedTextMessage().GetContextInfo()
 	message := contextInfo.GetQuotedMessage().String()
 
-	userCreationErr := gorm.G[User](DB).Create(ctx,
-		&User{
-			LID: LID, DisplayName: evt.Info.PushName, PhoneNumber: phoneNumber,
-			Messages: []Message{{
-				StanzaID: contextInfo.GetStanzaID(), SentAt: evt.Info.Timestamp, Type: MessageTypeText,
-				MessageAttachments: []MessageAttachment{{Body: &message}},
-			}},
-		})
-
-	if userCreationErr != nil {
+	user, err := queries.CreateUser(ctx, db.CreateUserParams{
+		LID:         LID,
+		PhoneNumber: &phoneNumber,
+		DisplayName: &evt.Info.PushName,
+	})
+	if err != nil {
 		_, sendErr := client.SendMessage(
 			ctx, evt.Info.Sender, &waE2E.Message{
 				Conversation: proto.String(
@@ -106,6 +107,26 @@ func handleNewUser(ctx context.Context, evt *events.Message, LID, phoneNumber st
 		return
 	}
 
+	stanzaID := contextInfo.GetStanzaID()
+	msg, msgErr := queries.CreateMessage(ctx, db.CreateMessageParams{
+		UserID:   user.ID,
+		StanzaID: &stanzaID,
+		SentAt:   evt.Info.Timestamp,
+		Type:     string(MessageTypeText),
+	})
+
+	if msgErr != nil {
+		slog.Error("message was not created", "error", msgErr)
+	} else {
+		_, attErr := queries.CreateMessageAttachment(ctx, db.CreateMessageAttachmentParams{
+			MessageID: msg.ID,
+			Body:      &message,
+		})
+		if attErr != nil {
+			slog.Error("failed to create message attachment", "error", attErr)
+		}
+	}
+
 	_, sendErr := client.SendMessage(
 		ctx, evt.Info.Sender, &waE2E.Message{
 			Conversation: proto.String(
@@ -116,17 +137,19 @@ func handleNewUser(ctx context.Context, evt *events.Message, LID, phoneNumber st
 	}
 }
 
-func handleExistingUser(ctx context.Context, evt *events.Message, user User) {
+func handleExistingUser(ctx context.Context, evt *events.Message, user db.User) {
 	contextInfo := evt.Message.GetExtendedTextMessage().GetContextInfo()
 	message := contextInfo.GetQuotedMessage().String()
 
-	msgCreationErr := gorm.G[Message](DB).Create(ctx,
-		&Message{
-			UserID: user.ID, StanzaID: contextInfo.GetStanzaID(), SentAt: evt.Info.Timestamp, Type: MessageTypeText,
-			MessageAttachments: []MessageAttachment{{Body: &message}},
-		})
+	stanzaID := contextInfo.GetStanzaID()
+	msg, msgErr := queries.CreateMessage(ctx, db.CreateMessageParams{
+		UserID:   user.ID,
+		StanzaID: &stanzaID,
+		SentAt:   evt.Info.Timestamp,
+		Type:     string(MessageTypeText),
+	})
 
-	if msgCreationErr != nil {
+	if msgErr != nil {
 		_, sendErr := client.SendMessage(
 			ctx, evt.Info.Sender, &waE2E.Message{
 				Conversation: proto.String(
@@ -136,17 +159,22 @@ func handleExistingUser(ctx context.Context, evt *events.Message, user User) {
 		if sendErr != nil {
 			slog.Error(ErrMsgNotSent)
 		}
+		return
+	}
+
+	_, attErr := queries.CreateMessageAttachment(ctx, db.CreateMessageAttachmentParams{
+		MessageID: msg.ID,
+		Body:      &message,
+	})
+	if attErr != nil {
+		slog.Error("failed to create message attachment", "error", attErr)
 	}
 }
 
-// getLIDFromEvent returns LID and PhoneNumber from the event
-// whatsapp is migrating from JID to LID so it is important to
-// store LID
 func getLIDAndNumberFromEvent(evt *events.Message) (string, string) {
 	if strings.Contains(evt.Info.Sender.String(), "@lid") {
 		return evt.Info.Sender.User, evt.Info.SenderAlt.User
 	}
-	// TODO: This block is to be tested as I don't have number that send JID
 	return evt.Info.SenderAlt.String(), evt.Info.Sender.User
 }
 
@@ -165,7 +193,6 @@ func startWaServerAndListenEvt() {
 	if err != nil {
 		panic(err)
 	}
-	// If you want multiple sessions, remember their JIDs and use .GetDevice(jid) or .GetAllDevices() instead.
 	deviceStore, err := container.GetFirstDevice(ctx)
 	if err != nil {
 		panic(err)
@@ -175,7 +202,6 @@ func startWaServerAndListenEvt() {
 	client.AddEventHandler(eventHandler)
 
 	if client.Store.ID == nil {
-		// No ID stored, new login
 		qrChan, qrErr := client.GetQRChannel(context.Background())
 		if qrErr != nil {
 			slog.Error("Qr Error: ", "error", qrErr)
@@ -200,7 +226,6 @@ func startWaServerAndListenEvt() {
 	}
 	defer client.Disconnect()
 
-	// Listen to Ctrl+C
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	<-c
